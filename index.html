@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interactive Landing</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  .stage { position: fixed; inset: 0; }
+  .stage video {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; opacity: 0; pointer-events: none;
+  }
+  .stage video.on { opacity: 1; }
+
+  /* debug overlay: press "D" */
+  .debug { position: fixed; inset: 0; display: none; pointer-events: none; }
+  .debug.show { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .debug div { border-right: 1px dashed rgba(255,255,255,.25); }
+  .debug div:last-child { border-right: 0; }
+  .debug div.active { background: rgba(255,255,255,.06); }
+  .debug pre {
+    position: fixed; left: 12px; bottom: 12px; margin: 0;
+    font: 12px/1.4 ui-monospace, Menlo, monospace; color: #9f9;
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <video id="idle"            src="assets/idle.mp4"            muted playsinline preload="auto" loop></video>
+  <video id="center-right"    src="assets/center-to-right.mp4" muted playsinline preload="auto"></video>
+  <video id="right-center"    src="assets/right-to-center.mp4" muted playsinline preload="auto"></video>
+  <video id="center-left"     src="assets/center-to-left.mp4"  muted playsinline preload="auto"></video>
+  <video id="left-center"     src="assets/left-to-center.mp4"  muted playsinline preload="auto"></video>
+</div>
+<div class="debug" id="debug"><div data-z="left"></div><div data-z="center"></div><div data-z="right"></div><pre></pre></div>
+
+<script>
+  // Speed used to finish the remaining idle loop before leaving center.
+  const IDLE_FAST_RATE = 4;
+
+  const videos = [...document.querySelectorAll('.stage video')];
+  const clip = id => document.getElementById(id);
+  const idle = clip('idle');
+
+  let state = 'center';   // where the character currently rests: left | center | right
+  let target = 'center';  // where the pointer wants it to be
+  let current = null;     // the visible <video>
+  let busy = false;
+
+  function show(v) {
+    videos.forEach(x => x.classList.toggle('on', x === v));
+    videos.forEach(x => { if (x !== v && !x.paused) x.pause(); });
+    current = v;
+    updateDebug();
+  }
+
+  // Resolve once the video has actually presented a frame, to avoid a black flash on swap.
+  function firstFrame(v) {
+    return new Promise(res => {
+      if ('requestVideoFrameCallback' in v) v.requestVideoFrameCallback(() => res());
+      else v.addEventListener('playing', () => res(), { once: true });
+    });
+  }
+
+  async function playFromStart(v) {
+    v.currentTime = 0;
+    const ready = firstFrame(v);
+    await v.play().catch(() => {});
+    await ready;
+    show(v);
+  }
+
+  async function playOnce(v) {
+    v.loop = false;
+    v.playbackRate = 1;
+    const ended = new Promise(res => v.addEventListener('ended', res, { once: true }));
+    await playFromStart(v);
+    await ended; // stays on its last frame
+  }
+
+  function startIdle() {
+    idle.loop = true;
+    idle.playbackRate = 1;
+    playFromStart(idle);
+  }
+
+  // Fast-forward the rest of the current idle cycle. Returns false if the
+  // pointer came back to center before it finished (idle keeps looping).
+  function finishIdle() {
+    if (current !== idle) return Promise.resolve(true);
+    idle.loop = false;
+    idle.playbackRate = IDLE_FAST_RATE;
+    return new Promise(res => {
+      const tick = () => {
+        if (target === 'center') {
+          idle.loop = true;
+          idle.playbackRate = 1;
+          if (idle.paused) idle.play();
+          return res(false);
+        }
+        if (idle.ended) return res(true);
+        requestAnimationFrame(tick);
+      };
+      tick();
+    });
+  }
+
+  async function run() {
+    if (busy) return;
+    busy = true;
+    while (target !== state) {
+      if (state === 'center') {
+        if (!(await finishIdle())) break;
+        const to = target;
+        if (to === 'center') break;
+        await playOnce(clip('center-' + to));
+        state = to;
+      } else {
+        await playOnce(clip(state + '-center'));
+        state = 'center';
+        if (target === 'center') startIdle();
+      }
+      updateDebug();
+    }
+    busy = false;
+    updateDebug();
+  }
+
+  function setTarget(zone) {
+    if (zone === target) return;
+    target = zone;
+    updateDebug();
+    run();
+  }
+
+  function zoneFromX(x) {
+    const r = x / window.innerWidth;
+    return r < 1 / 3 ? 'left' : r > 2 / 3 ? 'right' : 'center';
+  }
+
+  window.addEventListener('pointermove', e => setTarget(zoneFromX(e.clientX)));
+  window.addEventListener('pointerdown', e => setTarget(zoneFromX(e.clientX)));
+  document.documentElement.addEventListener('mouseleave', () => setTarget('center'));
+
+  // Debug overlay
+  const debug = document.getElementById('debug');
+  function updateDebug() {
+    if (!debug.classList.contains('show')) return;
+    debug.querySelectorAll('[data-z]').forEach(d => d.classList.toggle('active', d.dataset.z === target));
+    debug.querySelector('pre').textContent =
+      `target: ${target}\nstate:  ${state}\nclip:   ${current ? current.id : '-'}\nbusy:   ${busy}`;
+  }
+  window.addEventListener('keydown', e => {
+    if (e.key.toLowerCase() === 'd') { debug.classList.toggle('show'); updateDebug(); }
+  });
+
+  startIdle();
+</script>
+</body>
+</html>
